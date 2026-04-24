@@ -1,4 +1,4 @@
-const CACHE_NAME = "hook-analyzer-v1";
+const CACHE_NAME = "hook-analyzer-v1-0-2";
 const ASSETS = [
   "./",
   "./index.html",

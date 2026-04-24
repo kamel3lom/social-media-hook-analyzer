@@ -5,6 +5,8 @@
 
 "use strict";
 
+const APP_VERSION = "1.0.2";
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
@@ -957,15 +959,21 @@ function bindEvents() {
 
   $("#hookForm").addEventListener("submit", (event) => {
     event.preventDefault();
-    const input = readForm();
-    const error = validate(input);
-    if (error) {
-      showToast(error);
-      return;
-    }
 
-    const result = analyzeHook(input);
-    renderResult(result);
+    try {
+      const input = readForm();
+      const error = validate(input);
+      if (error) {
+        showToast(error);
+        return;
+      }
+
+      const result = analyzeHook(input);
+      renderResult(result);
+    } catch (error) {
+      console.error("Hook Analyzer failed:", error);
+      showToast("حدث خطأ في التحليل. حدّث ملفات النسخة v1.0.2 أو افتح Console لمعرفة التفاصيل.");
+    }
   });
 
   $("#clearForm").addEventListener("click", clearForm);

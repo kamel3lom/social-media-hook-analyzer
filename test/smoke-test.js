@@ -39,3 +39,16 @@ for (const [ok, message] of checks) {
 }
 
 console.log("Smoke test passed.");
+
+
+const estimateStart = js.indexOf("function estimateSuggestionScore");
+const cryptoStart = js.indexOf("function cryptoRandomId");
+if (estimateStart === -1 || cryptoStart === -1 || cryptoStart <= estimateStart) {
+  console.error("estimateSuggestionScore function block could not be detected");
+  process.exit(1);
+}
+const estimateBlock = js.slice(estimateStart, cryptoStart);
+if (estimateBlock.includes("analyzeHook(")) {
+  console.error("Regression: estimateSuggestionScore must not call analyzeHook");
+  process.exit(1);
+}
