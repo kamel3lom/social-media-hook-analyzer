@@ -619,21 +619,37 @@ function dedupeSuggestions(items) {
 }
 
 function estimateSuggestionScore(text, platformKey) {
-  const result = analyzeHook({
-    text,
-    platform: platformKey,
-    contentType: "educational",
-    audience: "",
-    tone: "professional",
-    language: isArabic(text) ? "ar" : "en",
-    suggestionCount: 6,
-    avoidClickbait: true,
-    addKamelSignature: false,
-    mainKeyword: "",
-    goal: "views"
-  });
+  // Lightweight scoring for generated suggestions.
+  // This must not call the full analyzer again; otherwise the UI enters
+  // a repeated scoring loop and the analyze button appears to do nothing.
+  const platform = platformProfiles[platformKey] || platformProfiles.general;
+  const lang = isArabic(text) ? "ar" : "en";
+  const lex = lexicon[lang];
+  const tokens = tokenize(text);
+  const cleanText = normalizeText(text);
+  const length = cleanText.length;
 
-  return result.score;
+  const hasQuestion = /[؟?]/.test(cleanText) || countMatches(tokens, lex.question, cleanText) > 0;
+  const hasNumber = /(\d+|[٠-٩]+|%|٪)/.test(cleanText);
+  const benefitHits = countMatches(tokens, lex.benefit, cleanText);
+  const curiosityHits = countMatches(tokens, lex.curiosity, cleanText);
+  const specificityHits = countMatches(tokens, lex.specificity, cleanText) + (hasNumber ? 1 : 0);
+  const weakHits = countMatches(tokens, lex.weak, cleanText);
+  const clickbaitHits = countMatches(tokens, lex.clickbait, cleanText);
+
+  const lengthFit = length >= platform.idealMin && length <= platform.idealMax ? 28 : 8;
+  const score =
+    38 +
+    lengthFit +
+    Math.min(18, benefitHits * 7) +
+    Math.min(16, curiosityHits * 6) +
+    Math.min(12, specificityHits * 5) +
+    (hasQuestion ? 7 : 0) +
+    (hasNumber ? 7 : 0) -
+    weakHits * 6 -
+    clickbaitHits * 8;
+
+  return Math.round(clamp(score, 0, 100));
 }
 
 function cryptoRandomId() {
