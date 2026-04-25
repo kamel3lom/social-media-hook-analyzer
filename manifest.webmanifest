@@ -1,1 +1,19 @@
-{"name":"Earth Engine Index Studio","short_name":"EE Index Studio","start_url":"./","scope":"./","display":"standalone","background_color":"#07111f","theme_color":"#07111f","orientation":"landscape-primary","icons":[{"src":"assets/favicon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
+{
+  "name": "Social Media Hook Analyzer",
+  "short_name": "Hook Analyzer",
+  "description": "Analyze social media hooks and generate stronger versions for YouTube, TikTok, Instagram, X, Facebook, and LinkedIn.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#111827",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
