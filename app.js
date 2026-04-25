@@ -1,1036 +1,965 @@
-/* Social Media Hook Analyzer
- * A client-side rule-based analyzer for social media hooks.
- * No external dependencies. No server. Works on GitHub Pages.
- */
-
 "use strict";
 
-const APP_VERSION = "1.0.2";
-
 const $ = (selector) => document.querySelector(selector);
-const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+const CONFIG = window.EE_INDEX_STUDIO_CONFIG || {};
+const CITIES = window.GEO_CITIES || [];
+const INDICES = window.GEO_INDICES || [];
+const STYLES = window.GEO_STYLE_PRESETS || {};
 
-const state = {
-  latest: null,
-  installPrompt: null
+const SCOPE = ["https://www.googleapis.com/auth/earthengine.readonly"];
+const EE_AUTH_SCOPE = "https://www.googleapis.com/auth/earthengine";
+const EE_AUTH_TIMEOUT_MS = 60000;
+
+const S = {
+  map: null,
+  aoiLayer: null,
+  eeLayer: null,
+  connected: false,
+  current: null,
+  oauthPrepared: false,
+  clientId: localStorage.getItem("ee_oauth_client_id") || CONFIG.OAUTH_CLIENT_ID || "",
+  projectId: localStorage.getItem("ee_cloud_project_id") || CONFIG.CLOUD_PROJECT_ID || ""
 };
 
-const platformProfiles = {
-  youtube: {
-    label: "يوتيوب",
-    idealMin: 38,
-    idealMax: 72,
-    maxLen: 100,
-    style: "وعد واضح + نتيجة ملموسة + كلمة مفتاحية قابلة للبحث",
-    weight: { clarity: 1.2, benefit: 1.25, curiosity: 1.05, specificity: 1.1, brevity: 0.9 }
-  },
-  tiktok: {
-    label: "تيك توك",
-    idealMin: 12,
-    idealMax: 45,
-    maxLen: 80,
-    style: "ضربة سريعة + فضول مباشر + صياغة محكية خفيفة دون إطالة",
-    weight: { clarity: 1.0, benefit: 1.0, curiosity: 1.3, specificity: 0.9, brevity: 1.25 }
-  },
-  instagram: {
-    label: "إنستغرام",
-    idealMin: 18,
-    idealMax: 58,
-    maxLen: 90,
-    style: "جملة مشوقة + فائدة قابلة للحفظ + لمسة بصرية/شخصية",
-    weight: { clarity: 1.05, benefit: 1.15, curiosity: 1.15, specificity: 1.0, brevity: 1.05 }
-  },
-  x: {
-    label: "X / تويتر",
-    idealMin: 20,
-    idealMax: 95,
-    maxLen: 260,
-    style: "تكثيف حاد + رأي أو فائدة واضحة + قابلية للنقاش",
-    weight: { clarity: 1.2, benefit: 1.05, curiosity: 1.05, specificity: 1.0, brevity: 1.05 }
-  },
-  facebook: {
-    label: "فيسبوك",
-    idealMin: 28,
-    idealMax: 120,
-    maxLen: 240,
-    style: "سرد قصير + وعد واضح + سؤال أو موقف يفتح التعليقات",
-    weight: { clarity: 1.1, benefit: 1.05, curiosity: 1.0, specificity: 1.0, brevity: 0.85 }
-  },
-  linkedin: {
-    label: "لينكدإن",
-    idealMin: 42,
-    idealMax: 140,
-    maxLen: 240,
-    style: "قيمة مهنية + خبرة أو درس + لغة موثوقة لا تستجدي الانتباه",
-    weight: { clarity: 1.25, benefit: 1.25, curiosity: 0.85, specificity: 1.15, brevity: 0.85 }
-  },
-  general: {
-    label: "عام",
-    idealMin: 24,
-    idealMax: 85,
-    maxLen: 180,
-    style: "وضوح + فائدة + فضول دون تضليل",
-    weight: { clarity: 1.1, benefit: 1.1, curiosity: 1.1, specificity: 1.05, brevity: 1.0 }
-  }
-};
-
-const contentTypeLabels = {
-  educational: "تعليمي",
-  news: "خبر",
-  story: "قصة",
-  offer: "عرض/خدمة",
-  debate: "جدلي",
-  entertainment: "ترفيهي",
-  portfolio: "عرض أعمال"
-};
-
-const toneLabels = {
-  professional: "احترافية",
-  curious: "فضولية",
-  bold: "قوية",
-  friendly: "ودية",
-  academic: "أكاديمية",
-  dramatic: "درامية"
-};
-
-const lexicon = {
-  ar: {
-    question: ["كيف", "لماذا", "متى", "أين", "هل", "ما", "ماذا", "كم"],
-    benefit: ["تعلم", "طريقة", "خطوات", "دليل", "شرح", "نتيجة", "حل", "أداة", "أفضل", "أسرع", "احترافي", "مجاني", "دقيق", "قالب", "برومبت", "خطة", "تجربة"],
-    curiosity: ["سر", "خطأ", "أخطر", "لا يعرف", "لن تصدق", "قبل", "بعد", "الحقيقة", "سبب", "مفاجأة", "مخفي", "يكشف", "يفشل", "ينجح"],
-    specificity: ["رقم", "أرقام", "دراسة", "خريطة", "مثال", "حالة", "قبل وبعد", "2026", "3", "5", "7", "10", "%"],
-    emotion: ["مذهل", "صادم", "قوي", "خطير", "مهم", "فاخر", "مبهر", "غريب", "مرعب", "مؤلم"],
-    cta: ["احفظ", "شارك", "اكتب", "جرّب", "شاهد", "تابع", "اضغط", "اسأل", "علّق"],
-    weak: ["جميل", "رائع", "مميز", "شيء", "أشياء", "موضوع", "بعض", "متنوع", "عام"],
-    clickbait: ["لن تصدق", "صدمة", "كارثة", "خطير جدا", "لا يفوتك", "أقوى شيء", "سر رهيب"]
-  },
-  en: {
-    question: ["how", "why", "when", "where", "what", "which", "can", "will"],
-    benefit: ["learn", "guide", "steps", "method", "tool", "template", "better", "faster", "free", "professional", "result", "fix", "workflow"],
-    curiosity: ["secret", "mistake", "truth", "hidden", "before", "after", "revealed", "fails", "works", "why"],
-    specificity: ["case", "example", "study", "map", "2026", "3", "5", "7", "10", "%"],
-    emotion: ["powerful", "shocking", "smart", "serious", "important", "premium", "strange"],
-    cta: ["save", "share", "try", "watch", "follow", "comment", "ask", "click"],
-    weak: ["nice", "great", "things", "stuff", "topic", "various", "amazing"],
-    clickbait: ["you won't believe", "shocking", "insane", "crazy", "must watch", "secret trick"]
-  }
-};
-
-const templatesAr = {
-  educational: [
-    "كيف {verb} {topic} دون {pain}؟",
-    "{number} خطوات لتحويل {topic} إلى نتيجة واضحة",
-    "قبل أن تستخدم {topic}: انتبه إلى هذا الخطأ",
-    "دليل سريع: كيف تبدأ في {topic} من الصفر؟",
-    "الطريقة العملية لفهم {topic} دون تعقيد"
-  ],
-  news: [
-    "ما الذي تغيّر في {topic}؟ شرح سريع دون تهويل",
-    "{topic}: أهم ما حدث ولماذا يهمك",
-    "تحديث مهم حول {topic}: الخلاصة في دقيقة",
-    "ما وراء خبر {topic}: التأثير الحقيقي"
-  ],
-  story: [
-    "جربت {topic} وكانت النتيجة غير متوقعة",
-    "ما تعلمته بعد تجربة {topic} عمليًا",
-    "قصة قصيرة تكشف خطأ شائعًا في {topic}",
-    "من الفكرة إلى النتيجة: تجربتي مع {topic}"
-  ],
-  offer: [
-    "هل تحتاج إلى {topic}؟ هذا ما يمكن إنجازه لك",
-    "خدمة {topic}: نتيجة أوضح ووقت أقل",
-    "قبل طلب خدمة {topic}: اعرف ما الذي ستحصل عليه",
-    "حوّل {topic} إلى عمل احترافي جاهز للاستخدام"
-  ],
-  debate: [
-    "المشكلة ليست في {topic}… بل في طريقة استخدامه",
-    "لماذا يفشل كثيرون في {topic} رغم توفر الأدوات؟",
-    "رأي صريح: {topic} ليس حلًا سحريًا",
-    "أكبر وهم منتشر حول {topic}"
-  ],
-  entertainment: [
-    "تحدي {topic}: النتيجة فاجأتني",
-    "ماذا يحدث لو استخدمنا {topic} بهذه الطريقة؟",
-    "تجربة سريعة مع {topic} تستحق المشاهدة",
-    "جانب غريب في {topic} لا ينتبه له كثيرون"
-  ],
-  portfolio: [
-    "من بيانات عادية إلى نتيجة احترافية: هذا مثال على {topic}",
-    "قبل وبعد: كيف تغيّر {topic} بهذه المعالجة؟",
-    "نموذج عمل جديد في {topic} — النتيجة النهائية",
-    "كيف صممت هذا العمل في {topic} خطوة بخطوة؟"
-  ]
-};
-
-const templatesEn = {
-  educational: [
-    "How to use {topic} without {pain}",
-    "{number} practical steps to improve {topic}",
-    "Before you try {topic}, avoid this mistake",
-    "A simple guide to mastering {topic}",
-    "The practical way to understand {topic}"
-  ],
-  news: [
-    "What changed in {topic} and why it matters",
-    "{topic}: the key update in plain language",
-    "The real impact behind {topic}",
-    "A quick breakdown of the latest {topic} update"
-  ],
-  story: [
-    "I tested {topic}, and the result surprised me",
-    "What I learned after trying {topic}",
-    "A short story that exposes a common {topic} mistake",
-    "From idea to result: my experience with {topic}"
-  ],
-  offer: [
-    "Need {topic}? Here is what can be done",
-    "{topic} service: clearer results in less time",
-    "Before ordering {topic}, know what you should get",
-    "Turn {topic} into a professional deliverable"
-  ],
-  debate: [
-    "The problem is not {topic} — it is how people use it",
-    "Why many creators fail at {topic}",
-    "Honest take: {topic} is not magic",
-    "The biggest myth about {topic}"
-  ],
-  entertainment: [
-    "{topic} challenge: the result was unexpected",
-    "What happens when we use {topic} this way?",
-    "A quick {topic} experiment worth watching",
-    "The strange side of {topic} people miss"
-  ],
-  portfolio: [
-    "From raw input to a professional result: {topic}",
-    "Before and after: how {topic} changed the outcome",
-    "A new {topic} project — final result",
-    "How I built this {topic} work step by step"
-  ]
-};
-
-const stopWordsAr = new Set(["في", "من", "على", "عن", "إلى", "الى", "هذا", "هذه", "ذلك", "التي", "الذي", "مع", "أو", "و", "ثم", "كما", "هل", "كيف", "لماذا"]);
-const stopWordsEn = new Set(["the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "how", "why", "what", "this", "that", "is", "are"]);
-
-function normalizeText(text) {
-  return String(text || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .replace(/[“”]/g, '"')
-    .replace(/[’]/g, "'");
+function init() {
+  initMap();
+  fillControls();
+  bindEvents();
+  updateIndexInfo();
+  updateDates();
+  drawAoi();
+  setStatus([
+    "الواجهة جاهزة.",
+    "اضغط ربط Earth Engine لفتح نافذة تسجيل الدخول.",
+    "إذا لم تفتح النافذة، اسمح بالنوافذ المنبثقة لهذا الموقع."
+  ]);
+  writeLog("Ready.");
+  prepareOauthSilently();
 }
 
-function isArabic(text) {
-  return /[\u0600-\u06FF]/.test(text);
+function initMap() {
+  S.map = L.map("map", { zoomControl: true, preferCanvas: true }).setView([30.0444, 31.2357], 10);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    crossOrigin: true,
+    attribution: "&copy; OpenStreetMap"
+  }).addTo(S.map);
 }
 
-function tokenize(text) {
-  return normalizeText(text)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}%#]+/gu, " ")
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-function countMatches(tokens, words, originalText = "") {
-  const lower = originalText.toLowerCase();
-  let score = 0;
-  words.forEach((word) => {
-    const w = word.toLowerCase();
-    if (w.includes(" ")) {
-      if (lower.includes(w)) score += 1;
-    } else if (tokens.includes(w)) {
-      score += 1;
-    }
-  });
-  return score;
-}
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function weightedAverage(metrics, weights) {
-  const keys = Object.keys(metrics);
-  let totalWeight = 0;
-  let total = 0;
-
-  keys.forEach((key) => {
-    const w = weights[key] || 1;
-    total += metrics[key] * w;
-    totalWeight += w;
-  });
-
-  return totalWeight ? total / totalWeight : 0;
-}
-
-function analyzeHook(input) {
-  const text = normalizeText(input.text);
-  const platform = platformProfiles[input.platform] || platformProfiles.general;
-  const lang = isArabic(text) ? "ar" : "en";
-  const lex = lexicon[lang];
-  const tokens = tokenize(text);
-  const length = text.length;
-  const wordCount = tokens.length;
-  const hasQuestion = /[؟?]/.test(text) || countMatches(tokens, lex.question, text) > 0;
-  const hasNumber = /(\d+|[٠-٩]+|%|٪)/.test(text);
-  const hasColon = /[:：]/.test(text);
-  const hasDash = /[-–—]/.test(text);
-  const hasKeyword = input.mainKeyword ? text.toLowerCase().includes(input.mainKeyword.toLowerCase()) : true;
-
-  const benefitHits = countMatches(tokens, lex.benefit, text);
-  const curiosityHits = countMatches(tokens, lex.curiosity, text);
-  const specificityHits = countMatches(tokens, lex.specificity, text) + (hasNumber ? 1 : 0);
-  const emotionHits = countMatches(tokens, lex.emotion, text);
-  const ctaHits = countMatches(tokens, lex.cta, text);
-  const weakHits = countMatches(tokens, lex.weak, text);
-  const clickbaitHits = countMatches(tokens, lex.clickbait, text);
-
-  const clarityBase = wordCount >= 3 ? 55 : 25;
-  const clarity = clamp(
-    clarityBase +
-      (hasQuestion ? 8 : 0) +
-      (hasColon || hasDash ? 7 : 0) +
-      (benefitHits ? 12 : 0) -
-      weakHits * 9 -
-      (wordCount > 22 ? 10 : 0),
-    0,
-    100
-  );
-
-  const benefit = clamp(32 + benefitHits * 18 + ctaHits * 8 + (input.goal === "trust" ? 5 : 0) + (hasKeyword ? 5 : -10), 0, 100);
-
-  const curiosity = clamp(28 + curiosityHits * 18 + (hasQuestion ? 14 : 0) + emotionHits * 7 + (hasNumber ? 8 : 0), 0, 100);
-
-  const specificity = clamp(25 + specificityHits * 18 + (hasNumber ? 17 : 0) + (input.audience ? 8 : 0) + (input.mainKeyword ? 12 : 0), 0, 100);
-
-  const lengthPenalty = length < platform.idealMin
-    ? (platform.idealMin - length) * 1.2
-    : length > platform.idealMax
-      ? (length - platform.idealMax) * 0.85
-      : 0;
-
-  const brevity = clamp(92 - lengthPenalty - Math.max(0, wordCount - 18) * 1.5, 0, 100);
-
-  const platformFit = clamp(
-    55 +
-      (length >= platform.idealMin && length <= platform.idealMax ? 25 : 0) +
-      (input.platform === "x" && length <= 220 ? 8 : 0) +
-      (input.platform === "tiktok" && hasQuestion ? 8 : 0) +
-      (input.platform === "youtube" && (benefitHits || input.mainKeyword) ? 8 : 0) +
-      (input.platform === "linkedin" && weakHits === 0 ? 6 : 0) -
-      clickbaitHits * 8,
-    0,
-    100
-  );
-
-  let metrics = { clarity, benefit, curiosity, specificity, brevity, platformFit };
-  let score = Math.round(weightedAverage(metrics, platform.weight));
-
-  if (input.avoidClickbait) {
-    score = clamp(score - clickbaitHits * 7, 0, 100);
-  }
-
-  const diagnosis = buildDiagnosis({
-    text,
-    lang,
-    platform,
-    input,
-    metrics,
-    length,
-    wordCount,
-    benefitHits,
-    curiosityHits,
-    specificityHits,
-    weakHits,
-    clickbaitHits,
-    hasQuestion,
-    hasNumber
-  });
-
-  const suggestions = generateSuggestions({
-    text,
-    lang: input.language,
-    detectedLang: lang,
-    input,
-    score,
-    metrics
-  });
-
-  return {
-    id: cryptoRandomId(),
-    createdAt: new Date().toISOString(),
-    input,
-    score,
-    label: getScoreLabel(score),
-    summary: getScoreSummary(score, platform),
-    metrics,
-    diagnosis,
-    suggestions
-  };
-}
-
-function buildDiagnosis(ctx) {
-  const items = [];
-  const platform = ctx.platform;
-
-  if (!ctx.text) {
-    return ["لم يتم إدخال نص للتحليل."];
-  }
-
-  if (ctx.length < platform.idealMin) {
-    items.push(`النص قصير جدًا لمنصة ${platform.label}. يحتاج وعدًا أوضح أو فائدة أكثر تحديدًا.`);
-  }
-
-  if (ctx.length > platform.idealMax) {
-    items.push(`النص أطول من المثالي لمنصة ${platform.label}. اختصره أو انقل التفاصيل إلى الوصف.`);
-  }
-
-  if (ctx.benefitHits === 0) {
-    items.push("الفائدة غير ظاهرة بما يكفي. أضف نتيجة واضحة: ماذا سيكسب القارئ أو المشاهد؟");
-  }
-
-  if (ctx.curiosityHits === 0 && !ctx.hasQuestion) {
-    items.push("عنصر الفضول ضعيف. أضف سؤالًا أو مفارقة أو خطأ شائعًا دون تضليل.");
-  }
-
-  if (ctx.specificityHits === 0 && !ctx.hasNumber) {
-    items.push("العنوان عام. الأرقام، المقارنة، المثال، أو كلمة مفتاحية محددة سترفع قوته.");
-  }
-
-  if (ctx.weakHits > 0) {
-    items.push("هناك كلمات عامة مثل: رائع/جميل/أشياء. استبدلها بنتيجة أو مشكلة محددة.");
-  }
-
-  if (ctx.clickbaitHits > 0) {
-    items.push("توجد رائحة Clickbait. اجعل الوعد قويًا لكن قابلًا للتصديق حتى لا تخسر الثقة.");
-  }
-
-  if (ctx.metrics.platformFit < 60) {
-    items.push(`صياغة الهوك لا تطابق تمامًا طبيعة ${platform.label}. النمط الأنسب: ${platform.style}.`);
-  }
-
-  if (items.length === 0) {
-    items.push("الهوك جيد من حيث الوضوح والفائدة والفضول. يمكن تحسينه بإضافة رقم أو نتيجة أكثر تحديدًا.");
-  }
-
-  return items.slice(0, 6);
-}
-
-function getScoreLabel(score) {
-  if (score >= 85) return "هوك قوي جدًا";
-  if (score >= 72) return "هوك جيد";
-  if (score >= 58) return "هوك متوسط";
-  if (score >= 40) return "هوك ضعيف يحتاج تحسينًا";
-  return "هوك ضعيف جدًا";
-}
-
-function getScoreSummary(score, platform) {
-  if (score >= 85) return `العنوان مناسب جدًا لمنصة ${platform.label}. يحتاج فقط اختبار نسخة بديلة A/B.`;
-  if (score >= 72) return `العنوان صالح للنشر، لكن يمكن رفعه بإضافة فائدة أدق أو فضول أنظف.`;
-  if (score >= 58) return `الفكرة مفهومة، لكن الهوك لا يزال متوسط التأثير. يحتاج وضوحًا وفائدة أقوى.`;
-  if (score >= 40) return `العنوان لا يلتقط الانتباه بما يكفي. أعد بناءه حول نتيجة أو مشكلة محددة.`;
-  return `العنوان عام أو غامض. يحتاج صياغة جديدة لا ترقيعًا بسيطًا.`;
-}
-
-function extractTopic(text, mainKeyword) {
-  if (mainKeyword && mainKeyword.trim()) return mainKeyword.trim();
-
-  const lang = isArabic(text) ? "ar" : "en";
-  const stops = lang === "ar" ? stopWordsAr : stopWordsEn;
-  const tokens = tokenize(text)
-    .filter((t) => !stops.has(t))
-    .filter((t) => t.length > 2 && !/^\d+$/.test(t));
-
-  if (!tokens.length) return lang === "ar" ? "هذه الفكرة" : "this idea";
-
-  const freq = {};
-  tokens.forEach((t) => {
-    freq[t] = (freq[t] || 0) + 1;
-  });
-
-  return Object.entries(freq)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
-    .map(([word]) => word)
-    .join(" ");
-}
-
-function inferPain(contentType, lang) {
-  if (lang === "en") {
-    const map = {
-      educational: "confusion",
-      news: "hype",
-      story: "guesswork",
-      offer: "wasting time",
-      debate: "common myths",
-      entertainment: "boring intros",
-      portfolio: "weak presentation"
-    };
-    return map[contentType] || "mistakes";
-  }
-
-  const map = {
-    educational: "التعقيد",
-    news: "التهويل",
-    story: "التخمين",
-    offer: "إضاعة الوقت",
-    debate: "الأوهام الشائعة",
-    entertainment: "المقدمات المملة",
-    portfolio: "العرض الضعيف"
-  };
-
-  return map[contentType] || "الأخطاء";
-}
-
-function pickNumber(goal) {
-  const map = {
-    views: 5,
-    saves: 7,
-    comments: 3,
-    clicks: 4,
-    trust: 6,
-    sales: 5
-  };
-  return map[goal] || 5;
-}
-
-function fillTemplate(template, data) {
-  return template
-    .replaceAll("{topic}", data.topic)
-    .replaceAll("{pain}", data.pain)
-    .replaceAll("{number}", String(data.number))
-    .replaceAll("{verb}", data.verb);
-}
-
-function generateSuggestions(ctx) {
-  const target = Number(ctx.input.suggestionCount || 10);
-  const wantsAr = ctx.lang === "ar" || ctx.lang === "both";
-  const wantsEn = ctx.lang === "en" || ctx.lang === "both";
-  const sourceText = ctx.text;
-  const topic = extractTopic(sourceText, ctx.input.mainKeyword);
-  const contentType = ctx.input.contentType || "educational";
-  const goal = ctx.input.goal || "views";
-  const audience = normalizeText(ctx.input.audience);
-  const platform = platformProfiles[ctx.input.platform] || platformProfiles.general;
-  const signature = ctx.input.addKamelSignature ? " #kamel3lom" : "";
-
-  const suggestions = [];
-
-  if (wantsAr) {
-    const data = {
-      topic,
-      pain: inferPain(contentType, "ar"),
-      number: pickNumber(goal),
-      verb: "تستخدم"
-    };
-
-    const base = templatesAr[contentType] || templatesAr.educational;
-    base.forEach((tpl) => {
-      suggestions.push(makeSuggestion(fillTemplate(tpl, data) + signature, "ar", "صياغة أساسية", platform));
-    });
-
-    suggestions.push(makeSuggestion(`أكبر خطأ في ${topic} وكيف تتجنبه من البداية${signature}`, "ar", "خطأ شائع", platform));
-    suggestions.push(makeSuggestion(`${pickNumber(goal)} أشياء ترفع جودة ${topic} فورًا${signature}`, "ar", "قائمة قابلة للحفظ", platform));
-    suggestions.push(makeSuggestion(`لماذا لا ينجح ${topic} مع كثير من الناس؟${signature}`, "ar", "فضول تحليلي", platform));
-
-    if (audience) {
-      suggestions.push(makeSuggestion(`لـ ${audience}: طريقة عملية لتحسين ${topic} دون تعقيد${signature}`, "ar", "تخصيص الجمهور", platform));
-    }
-
-    if (ctx.input.tone === "bold") {
-      suggestions.push(makeSuggestion(`رأي صريح: أغلب من يتحدث عن ${topic} يشرح نصف الحقيقة${signature}`, "ar", "رأي جريء", platform));
-    }
-
-    if (ctx.input.tone === "academic") {
-      suggestions.push(makeSuggestion(`${topic}: قراءة منهجية مختصرة بدل الانطباعات العامة${signature}`, "ar", "أكاديمي", platform));
-    }
-  }
-
-  if (wantsEn) {
-    const topicEn = isArabic(topic) ? transliterateTopic(topic) : topic;
-    const data = {
-      topic: topicEn,
-      pain: inferPain(contentType, "en"),
-      number: pickNumber(goal),
-      verb: "use"
-    };
-
-    const base = templatesEn[contentType] || templatesEn.educational;
-    base.forEach((tpl) => {
-      suggestions.push(makeSuggestion(fillTemplate(tpl, data) + signature, "en", "Base rewrite", platform));
-    });
-
-    suggestions.push(makeSuggestion(`The biggest ${topicEn} mistake — and how to avoid it${signature}`, "en", "Common mistake", platform));
-    suggestions.push(makeSuggestion(`${pickNumber(goal)} ways to improve ${topicEn} today${signature}`, "en", "Save-worthy list", platform));
-    suggestions.push(makeSuggestion(`Why ${topicEn} does not work for most people${signature}`, "en", "Curiosity", platform));
-
-    if (audience && !isArabic(audience)) {
-      suggestions.push(makeSuggestion(`For ${audience}: a practical way to improve ${topicEn}${signature}`, "en", "Audience fit", platform));
-    }
-  }
-
-  return dedupeSuggestions(suggestions)
-    .map((item) => ({
-      ...item,
-      scoreEstimate: estimateSuggestionScore(item.text, ctx.input.platform)
-    }))
-    .sort((a, b) => b.scoreEstimate - a.scoreEstimate)
-    .slice(0, target);
-}
-
-function transliterateTopic(topic) {
-  const dictionary = {
-    "الذكاء": "AI",
-    "الاصطناعي": "AI",
-    "خرائط": "maps",
-    "خريطة": "map",
-    "بحث": "research",
-    "دراسة": "study",
-    "برومبت": "prompt",
-    "تصميم": "design",
-    "تحليل": "analysis",
-    "احصائي": "statistical analysis",
-    "إحصائي": "statistical analysis"
-  };
-
-  const words = tokenize(topic);
-  const translated = words.map((word) => dictionary[word] || "").filter(Boolean);
-  return translated.length ? Array.from(new Set(translated)).join(" ") : "this topic";
-}
-
-function makeSuggestion(text, lang, type, platform) {
-  const clean = normalizeText(text);
-  return {
-    id: cryptoRandomId(),
-    text: clean,
-    lang,
-    type,
-    platform: platform.label,
-    length: clean.length
-  };
-}
-
-function dedupeSuggestions(items) {
-  const seen = new Set();
-  return items.filter((item) => {
-    const key = item.text.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function estimateSuggestionScore(text, platformKey) {
-  // Lightweight scoring for generated suggestions.
-  // This must not call the full analyzer again; otherwise the UI enters
-  // a repeated scoring loop and the analyze button appears to do nothing.
-  const platform = platformProfiles[platformKey] || platformProfiles.general;
-  const lang = isArabic(text) ? "ar" : "en";
-  const lex = lexicon[lang];
-  const tokens = tokenize(text);
-  const cleanText = normalizeText(text);
-  const length = cleanText.length;
-
-  const hasQuestion = /[؟?]/.test(cleanText) || countMatches(tokens, lex.question, cleanText) > 0;
-  const hasNumber = /(\d+|[٠-٩]+|%|٪)/.test(cleanText);
-  const benefitHits = countMatches(tokens, lex.benefit, cleanText);
-  const curiosityHits = countMatches(tokens, lex.curiosity, cleanText);
-  const specificityHits = countMatches(tokens, lex.specificity, cleanText) + (hasNumber ? 1 : 0);
-  const weakHits = countMatches(tokens, lex.weak, cleanText);
-  const clickbaitHits = countMatches(tokens, lex.clickbait, cleanText);
-
-  const lengthFit = length >= platform.idealMin && length <= platform.idealMax ? 28 : 8;
-  const score =
-    38 +
-    lengthFit +
-    Math.min(18, benefitHits * 7) +
-    Math.min(16, curiosityHits * 6) +
-    Math.min(12, specificityHits * 5) +
-    (hasQuestion ? 7 : 0) +
-    (hasNumber ? 7 : 0) -
-    weakHits * 6 -
-    clickbaitHits * 8;
-
-  return Math.round(clamp(score, 0, 100));
-}
-
-function cryptoRandomId() {
-  if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
-  return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function readForm() {
-  return {
-    text: $("#hookText").value,
-    platform: $("#platform").value,
-    contentType: $("#contentType").value,
-    audience: $("#audience").value,
-    tone: $("#tone").value,
-    language: $("#language").value,
-    suggestionCount: $("#suggestionCount").value,
-    avoidClickbait: $("#avoidClickbait").checked,
-    addKamelSignature: $("#addKamelSignature").checked,
-    mainKeyword: $("#mainKeyword").value,
-    goal: $("#goal").value
-  };
-}
-
-function validate(input) {
-  const text = normalizeText(input.text);
-  if (!text) return "اكتب فكرة منشور أو عنوان فيديو أولًا.";
-  if (text.length < 4) return "النص قصير جدًا للتحليل. اكتب جملة أو عنوانًا واضحًا.";
-  return "";
-}
-
-function renderResult(result) {
-  state.latest = result;
-
-  const scoreRing = $(".score-ring");
-  scoreRing.style.setProperty("--score", String(result.score));
-  scoreRing.style.setProperty("--ring-color", scoreColor(result.score));
-  $("#scoreValue").textContent = result.score;
-  $("#scoreLabel").textContent = result.label;
-  $("#scoreSummary").textContent = result.summary;
-
-  const metricLabels = {
-    clarity: "الوضوح",
-    benefit: "الفائدة",
-    curiosity: "الفضول",
-    specificity: "التحديد",
-    brevity: "الاختصار",
-    platformFit: "ملاءمة المنصة"
-  };
-
-  $("#metrics").innerHTML = Object.entries(result.metrics)
-    .map(([key, value]) => `
-      <div class="metric">
-        <span>${metricLabels[key] || key}</span>
-        <div class="bar"><i style="width:${Math.round(value)}%"></i></div>
-        <strong>${Math.round(value)}</strong>
-      </div>
-    `)
+function fillControls() {
+  $("#city").innerHTML = CITIES
+    .map((c) => `<option value="${c.id}">${escapeHtml(c.ar)} — ${escapeHtml(c.en)}</option>`)
     .join("");
+  $("#city").value = CONFIG.DEFAULT_CITY || "cairo";
 
-  $("#diagnosisList").innerHTML = result.diagnosis.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
-
-  $("#suggestions").innerHTML = result.suggestions
-    .map((item, index) => `
-      <article class="suggestion-card">
-        <div class="suggestion-top">
-          <div>
-            <p>${index + 1}. ${escapeHtml(item.text)}</p>
-            <div class="suggestion-meta">
-              <span class="chip">${escapeHtml(item.type)}</span>
-              <span class="chip">${escapeHtml(item.platform)}</span>
-              <span class="chip">${item.length} حرفًا</span>
-              <span class="chip">تقدير ${item.scoreEstimate}/100</span>
-            </div>
-          </div>
-          <button class="copy-one" data-copy="${escapeHtmlAttr(item.text)}" type="button">نسخ</button>
-        </div>
-      </article>
-    `)
+  $("#idx").innerHTML = INDICES
+    .map((i) => `<option value="${i.id}">${escapeHtml(i.ar)} (${escapeHtml(i.id)})</option>`)
     .join("");
+  $("#idx").value = CONFIG.DEFAULT_INDEX || "NDVI";
 
-  $("#copyReport").disabled = false;
-  $("#copySuggestions").disabled = false;
-  $("#downloadJson").disabled = false;
-  $("#downloadCsv").disabled = false;
+  $("#style").value = CONFIG.DEFAULT_STYLE || "luxury";
+  $("#sensor").value = CONFIG.DEFAULT_SENSOR || "auto";
+  $("#email").value = CONFIG.DEFAULT_EMAIL || "";
 
-  saveToHistory(result);
-  renderHistory();
-}
-
-function scoreColor(score) {
-  if (score >= 80) return "var(--good)";
-  if (score >= 60) return "var(--primary)";
-  if (score >= 42) return "var(--warning)";
-  return "var(--danger)";
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function escapeHtmlAttr(value) {
-  return escapeHtml(value).replaceAll("\n", " ");
-}
-
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast("تم النسخ بنجاح.");
-  } catch {
-    fallbackCopy(text);
-  }
-}
-
-function fallbackCopy(text) {
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.appendChild(area);
-  area.focus();
-  area.select();
-  try {
-    document.execCommand("copy");
-    showToast("تم النسخ بنجاح.");
-  } catch {
-    showToast("تعذر النسخ تلقائيًا. انسخ النص يدويًا.");
-  } finally {
-    area.remove();
-  }
-}
-
-function reportText(result) {
-  const metrics = Object.entries(result.metrics)
-    .map(([key, val]) => `- ${key}: ${Math.round(val)}/100`)
-    .join("\n");
-
-  const diagnosis = result.diagnosis.map((x) => `- ${x}`).join("\n");
-  const suggestions = result.suggestions.map((x, i) => `${i + 1}. ${x.text}`).join("\n");
-
-  return [
-    "Social Media Hook Analyzer",
-    "===========================",
-    `النص: ${result.input.text}`,
-    `المنصة: ${platformProfiles[result.input.platform].label}`,
-    `نوع المحتوى: ${contentTypeLabels[result.input.contentType] || result.input.contentType}`,
-    `النبرة: ${toneLabels[result.input.tone] || result.input.tone}`,
-    `النتيجة: ${result.score}/100 — ${result.label}`,
-    "",
-    "المؤشرات:",
-    metrics,
-    "",
-    "التشخيص:",
-    diagnosis,
-    "",
-    "اقتراحات أقوى:",
-    suggestions,
-    "",
-    "kamel3lom"
-  ].join("\n");
-}
-
-function suggestionsText(result) {
-  return result.suggestions.map((x, i) => `${i + 1}. ${x.text}`).join("\n");
-}
-
-function downloadFile(filename, content, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
-function toCsv(result) {
-  const rows = [
-    ["rank", "suggestion", "type", "platform", "length", "score_estimate"]
-  ];
-
-  result.suggestions.forEach((s, index) => {
-    rows.push([index + 1, s.text, s.type, s.platform, s.length, s.scoreEstimate]);
-  });
-
-  return rows.map((row) => row.map(csvCell).join(",")).join("\n");
-}
-
-function csvCell(value) {
-  const text = String(value ?? "");
-  return `"${text.replaceAll('"', '""')}"`;
-}
-
-function saveToHistory(result) {
-  const history = getHistory();
-  const entry = {
-    id: result.id,
-    createdAt: result.createdAt,
-    text: result.input.text,
-    platform: result.input.platform,
-    score: result.score,
-    result
-  };
-
-  const next = [entry, ...history.filter((h) => h.text !== entry.text)].slice(0, 8);
-  localStorage.setItem("hookAnalyzerHistory", JSON.stringify(next));
-}
-
-function getHistory() {
-  try {
-    const raw = localStorage.getItem("hookAnalyzerHistory");
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function renderHistory() {
-  const history = getHistory();
-  if (!history.length) {
-    $("#historyList").innerHTML = `<p class="empty">لا يوجد سجل بعد.</p>`;
-    return;
-  }
-
-  $("#historyList").innerHTML = history.map((item) => `
-    <div class="history-item">
-      <button type="button" data-history-id="${escapeHtmlAttr(item.id)}">
-        <strong>${item.score}/100</strong>
-        <div>${escapeHtml(item.text.slice(0, 88))}${item.text.length > 88 ? "…" : ""}</div>
-        <small>${escapeHtml(platformProfiles[item.platform]?.label || item.platform)} — ${new Date(item.createdAt).toLocaleString("ar")}</small>
-      </button>
-    </div>
-  `).join("");
-}
-
-function showToast(message) {
-  const toast = $("#toast");
-  toast.textContent = message;
-  toast.classList.add("show");
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2200);
-}
-
-function clearForm() {
-  $("#hookForm").reset();
-  $("#hookText").value = "";
-  $("#charCount").textContent = "0";
-  $("#hookText").focus();
-}
-
-function initTheme() {
-  const saved = localStorage.getItem("hookAnalyzerTheme");
-  if (saved) {
-    document.documentElement.dataset.theme = saved;
-  }
-}
-
-function toggleTheme() {
-  const current = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-  if (current === "dark") {
-    delete document.documentElement.dataset.theme;
-    localStorage.setItem("hookAnalyzerTheme", "dark");
-  } else {
-    document.documentElement.dataset.theme = "light";
-    localStorage.setItem("hookAnalyzerTheme", "light");
-  }
-}
-
-function initPwaInstall() {
-  window.addEventListener("beforeinstallprompt", (event) => {
-    event.preventDefault();
-    state.installPrompt = event;
-    $("#installApp").hidden = false;
-  });
-
-  $("#installApp").addEventListener("click", async () => {
-    if (!state.installPrompt) return;
-    state.installPrompt.prompt();
-    await state.installPrompt.userChoice;
-    state.installPrompt = null;
-    $("#installApp").hidden = true;
-  });
-}
-
-function registerServiceWorker() {
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("./sw.js").catch(() => {
-        // Silent fail: the app still works without offline cache.
-      });
-    });
-  }
+  const currentYear = new Date().getFullYear();
+  const years = Array.from({ length: currentYear - 1984 }, (_, i) => currentYear - i);
+  $("#year").innerHTML = years.map((y) => `<option value="${y}">${y}</option>`).join("");
+  $("#year").value = String(currentYear - 1);
 }
 
 function bindEvents() {
-  $("#hookText").addEventListener("input", () => {
-    $("#charCount").textContent = String($("#hookText").value.length);
+  $("#settingsBtn").addEventListener("click", openSettings);
+  $("#saveSettings").addEventListener("click", saveSettings);
+  $("#connectBtn").addEventListener("click", () => connectByPopup().catch(handleError));
+
+  $("#form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAnalysis().catch(handleError);
   });
 
-  $("#hookForm").addEventListener("submit", (event) => {
-    event.preventDefault();
+  $("#idx").addEventListener("change", updateIndexInfo);
+  $("#year").addEventListener("change", updateDates);
+  $("#city").addEventListener("change", drawAoi);
+  $("#bbox").addEventListener("change", drawAoi);
+  $("#fit").addEventListener("click", fitAoi);
+  $("#clear").addEventListener("click", clearLayer);
+  $("#reset").addEventListener("click", () => window.location.reload());
+
+  $("#geojson").addEventListener("click", downloadGeoJSON);
+  $("#shp").addEventListener("click", () => downloadSHP().catch(handleError));
+  $("#png").addEventListener("click", () => downloadPNG().catch(handleError));
+  $("#posterpng").addEventListener("click", () => downloadPosterPNG().catch(handleError));
+  $("#tif").addEventListener("click", () => downloadTIF().catch(handleError));
+  $("#script").addEventListener("click", copyScript);
+  $("#report").addEventListener("click", copyReport);
+}
+
+function openSettings() {
+  $("#clientId").value = S.clientId || "";
+  $("#projectId").value = S.projectId || "";
+  $("#settings").showModal();
+}
+
+function saveSettings() {
+  S.clientId = $("#clientId").value.trim();
+  S.projectId = $("#projectId").value.trim();
+  localStorage.setItem("ee_oauth_client_id", S.clientId);
+  localStorage.setItem("ee_cloud_project_id", S.projectId);
+  $("#settings").close();
+  showToast("تم حفظ الإعدادات محليًا.");
+  writeLog("Settings saved locally.");
+  prepareOauthSilently();
+}
+
+function prepareOauthSilently() {
+  S.oauthPrepared = true;
+  writeLog("Silent OAuth disabled in v1.0.2. Use connect button for Google Identity Services Token Flow.");
+}
+
+async function connectByPopup() {
+  if (typeof ee === "undefined" || !ee.data) {
+    throw new Error("لم يتم تحميل مكتبة Earth Engine. تحقق من الاتصال بالإنترنت أو من حظر السكربتات الخارجية.");
+  }
+
+  if (!window.google || !google.accounts || !google.accounts.oauth2) {
+    throw new Error("لم يتم تحميل Google Identity Services. عطّل مانع الإعلانات مؤقتًا أو حدّث الصفحة Ctrl+Shift+R.");
+  }
+
+  const clientId = String(S.clientId || "").trim();
+  if (!clientId || !clientId.endsWith(".apps.googleusercontent.com")) {
+    openSettings();
+    throw new Error("OAuth Client ID غير موجود أو غير صحيح. أدخله كاملًا من الإعدادات.");
+  }
+
+  setAuth("work");
+  setButtons(false);
+  setStatus([
+    "تم فتح تسجيل الدخول عبر Google.",
+    "اختر الحساب ثم وافق على صلاحية Earth Engine إن ظهرت شاشة الموافقة.",
+    "إذا لم تكتمل العملية خلال دقيقة، اسمح بالنوافذ المنبثقة والكوكيز ثم جرّب مجددًا."
+  ]);
+  writeLog("Starting Google Identity Services token flow...");
+
+  return new Promise((resolve, reject) => {
+    let completed = false;
+
+    const fail = (message) => {
+      if (completed) return;
+      completed = true;
+      setButtons(true);
+      setAuth(false);
+      reject(new Error(message));
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      fail("انتهت مهلة تسجيل الدخول. غالبًا تم حظر النافذة أو لم تكتمل موافقة Google. جرّب نافذة خفية واسمح بالكوكيز والنوافذ المنبثقة.");
+    }, EE_AUTH_TIMEOUT_MS);
 
     try {
-      const input = readForm();
-      const error = validate(input);
-      if (error) {
-        showToast(error);
-        return;
-      }
+      const tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: EE_AUTH_SCOPE,
+        prompt: "consent",
+        callback: (response) => {
+          if (completed) return;
+          completed = true;
+          window.clearTimeout(timeoutId);
 
-      const result = analyzeHook(input);
-      renderResult(result);
+          if (!response) {
+            setButtons(true);
+            setAuth(false);
+            reject(new Error("لم يرجع Google أي استجابة من تسجيل الدخول."));
+            return;
+          }
+
+          if (response.error) {
+            setButtons(true);
+            setAuth(false);
+            reject(new Error(response.error_description || response.error));
+            return;
+          }
+
+          if (!response.access_token) {
+            setButtons(true);
+            setAuth(false);
+            reject(new Error("لم يتم الحصول على Access Token. تأكد أن البريد ضمن Test users وأن Earth Engine مفعل للحساب."));
+            return;
+          }
+
+          const expiresIn = Number(response.expires_in || 3600);
+          const projectId = String(S.projectId || "").trim();
+
+          writeLog("Access token received. Passing token to Earth Engine...");
+
+          try {
+            ee.data.setAuthToken(
+              clientId,
+              "Bearer",
+              response.access_token,
+              expiresIn,
+              [EE_AUTH_SCOPE],
+              () => {
+                writeLog("Auth token set. Initializing Earth Engine...");
+                ee.initialize(
+                  null,
+                  null,
+                  () => {
+                    S.connected = true;
+                    setAuth(true);
+                    setButtons(true);
+                    setStatus([
+                      "تم الاتصال بـ Earth Engine بنجاح.",
+                      projectId ? `Cloud Project ID: ${projectId}` : "لم يتم تحديد Cloud Project ID؛ إذا ظهر خطأ لاحقًا ضعه في الإعدادات.",
+                      "يمكنك الآن تنفيذ التحليل."
+                    ]);
+                    writeLog("Earth Engine initialized successfully.");
+                    showToast("تم الاتصال بـ Earth Engine.");
+                    resolve(true);
+                  },
+                  (error) => {
+                    setButtons(true);
+                    setAuth(false);
+                    reject(new Error(formatEeError(error)));
+                  },
+                  null,
+                  projectId || undefined
+                );
+              },
+              false,
+              true
+            );
+          } catch (error) {
+            setButtons(true);
+            setAuth(false);
+            reject(error);
+          }
+        },
+        error_callback: (error) => {
+          window.clearTimeout(timeoutId);
+          fail(error?.message || error?.type || "فشل تسجيل الدخول عبر Google Identity Services.");
+        }
+      });
+
+      tokenClient.requestAccessToken({ prompt: "consent" });
     } catch (error) {
-      console.error("Hook Analyzer failed:", error);
-      showToast("حدث خطأ في التحليل. حدّث ملفات النسخة v1.0.2 أو افتح Console لمعرفة التفاصيل.");
+      window.clearTimeout(timeoutId);
+      fail(error?.message || String(error));
     }
-  });
-
-  $("#clearForm").addEventListener("click", clearForm);
-  $("#toggleTheme").addEventListener("click", toggleTheme);
-
-  $("#copyReport").addEventListener("click", () => {
-    if (state.latest) copyText(reportText(state.latest));
-  });
-
-  $("#copySuggestions").addEventListener("click", () => {
-    if (state.latest) copyText(suggestionsText(state.latest));
-  });
-
-  $("#downloadJson").addEventListener("click", () => {
-    if (!state.latest) return;
-    downloadFile("hook-analysis.json", JSON.stringify(state.latest, null, 2), "application/json;charset=utf-8");
-  });
-
-  $("#downloadCsv").addEventListener("click", () => {
-    if (!state.latest) return;
-    downloadFile("hook-suggestions.csv", toCsv(state.latest), "text/csv;charset=utf-8");
-  });
-
-  $("#suggestions").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-copy]");
-    if (button) copyText(button.dataset.copy);
-  });
-
-  $("#historyList").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-history-id]");
-    if (!button) return;
-    const id = button.dataset.historyId;
-    const item = getHistory().find((entry) => entry.id === id);
-    if (item && item.result) {
-      renderResult(item.result);
-      $("#hookText").value = item.result.input.text;
-      $("#charCount").textContent = String($("#hookText").value.length);
-      showToast("تم استرجاع التحليل من السجل.");
-    }
-  });
-
-  $("#clearHistory").addEventListener("click", () => {
-    localStorage.removeItem("hookAnalyzerHistory");
-    renderHistory();
-    showToast("تم حذف السجل.");
   });
 }
 
-function init() {
-  initTheme();
-  bindEvents();
-  renderHistory();
-  initPwaInstall();
-  registerServiceWorker();
-
-  // Demo text for first load without forcing an analysis.
-  $("#charCount").textContent = String($("#hookText").value.length);
+function formatEeError(error) {
+  if (!error) return "فشل تهيئة Earth Engine.";
+  if (typeof error === "string") return error;
+  if (error.message) return error.message;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
-document.addEventListener("DOMContentLoaded", init);
+function initializeEarthEngine(source) {
+  try {
+    ee.initialize(
+      null,
+      null,
+      () => {
+        S.connected = true;
+        setAuth(true);
+        setStatus([
+          "تم الاتصال بـ Earth Engine بنجاح.",
+          "اختر المؤشر والمدينة والسنة ثم اضغط تنفيذ التحليل."
+        ]);
+        writeLog(`Earth Engine initialized via ${source}.`);
+        showToast("تم الاتصال بـ Earth Engine.");
+      },
+      (error) => handleError(error)
+    );
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+async function runAnalysis() {
+  if (!S.connected) {
+    await connectByPopup();
+  }
+
+  const p = readParams();
+  validateParams(p);
+  setButtons(false);
+  setAuth("work");
+  writeLog(`Analysis started: ${p.indexId} | ${p.city.en} | ${p.start} → ${p.end}`);
+
+  const aoi = ee.Geometry.Rectangle(p.bbox, null, false);
+  const comp = buildComposite(p, aoi);
+  const img = computeIndex(comp.image, p.def).rename(p.indexId).clip(aoi);
+
+  // v2 cartographic engine: classify the raw index into meaningful GIS classes
+  // instead of drawing a vague single-color continuous rectangle.
+  const styled = classifyImageForMap(img, p.def, p.styleId);
+  const displayImg = styled.image;
+  const vis = styled.vis;
+
+  clearLayer();
+
+  const mapId = await eePromise((resolve, reject) => {
+    displayImg.getMap(vis, (data, error) => (error ? reject(error) : resolve(data)));
+  });
+
+  S.eeLayer = L.tileLayer(mapId.urlFormat, {
+    attribution: "Google Earth Engine",
+    opacity: p.styleId === "poster" ? 0.78 : 0.72
+  }).addTo(S.map);
+
+  S.current = { p, aoi, img, displayImg, vis, comp, classSpec: styled.classSpec };
+  updateLegend(p.def, vis, styled.classSpec);
+  $("#title").textContent = `${p.def.ar} — ${p.city.ar} — ${p.year}`;
+  drawAoi();
+  fitAoi();
+  enableExportButtonsV103(true);
+
+  try {
+    await updateStats(img, aoi, p.scale, p.indexId);
+  } catch (statsError) {
+    resetStats();
+    writeLog("STATS_WARNING_MEMORY_SAFE_V103: " + safeEeMessageV103(statsError));
+    setStatus([
+      `تم عرض مؤشر ${p.indexId} على الخريطة بنجاح.`,
+      "تعذر حساب الإحصاءات بسبب حد الذاكرة في Earth Engine، لكن أزرار التصدير متاحة الآن.",
+      "للمدن الكبيرة: استخدم دقة 100 أو 250 مترًا، أو قلّل مساحة AOI أو الفترة الزمنية."
+    ]);
+  }
+
+  setButtons(true);
+  setAuth(true);
+  setStatus([
+    `تم تنفيذ مؤشر ${p.indexId}.`,
+    `المصدر: ${comp.label}.`,
+    `الدقة: ${p.scale} متر.`,
+    "تم تحويل القيم الخام إلى طبقات تفسيرية ملوّنة لقراءة التوزيع المكاني بوضوح.",
+    "يمكن الآن تنزيل PNG أو GeoTIFF أو نسخ كود التصدير الكبير.",
+    "إذا فشل تنزيل GeoTIFF المباشر بسبب الذاكرة، استخدم كود التصدير الكبير."
+  ]);
+  writeLog("Analysis completed.");
+  showToast("تم التحليل بنجاح.");
+}
+
+function readParams() {
+  const cityDef = CITIES.find((c) => c.id === $("#city").value) || CITIES[0];
+  const indexDef = INDICES.find((i) => i.id === $("#idx").value) || INDICES[0];
+  const year = Number($("#year").value);
+  const bbox = parseBbox($("#bbox").value) || cityDef.bbox;
+
+  return {
+    city: cityDef,
+    def: indexDef,
+    indexId: indexDef.id,
+    year,
+    start: $("#start").value || `${year}-01-01`,
+    end: $("#end").value || `${year}-12-31`,
+    bbox,
+    sensor: $("#sensor").value,
+    styleId: $("#style").value,
+    cloud: Number($("#cloud").value || 35),
+    scale: Number($("#scale").value || 30),
+    email: $("#email").value.trim()
+  };
+}
+
+function validateParams(p) {
+  if (!p.bbox || p.bbox.length !== 4) throw new Error("AOI غير صالح.");
+  if (p.start > p.end) throw new Error("تاريخ البداية بعد تاريخ النهاية.");
+  if (p.def.forceSensor === "landsat" && p.sensor === "s2") throw new Error("مؤشر LST يحتاج Landsat.");
+}
+
+function chooseSensor(p) {
+  if (p.def.forceSensor === "landsat") return "landsat";
+  if (p.sensor !== "auto") return p.sensor;
+  return p.year >= 2017 ? "s2" : "landsat";
+}
+
+function buildComposite(p, aoi) {
+  if (chooseSensor(p) === "s2") {
+    return {
+      label: "Sentinel-2 SR Harmonized",
+      image: ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+        .filterBounds(aoi)
+        .filterDate(p.start, p.end)
+        .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", p.cloud))
+        .map(maskS2)
+        .median()
+    };
+  }
+
+  return {
+    label: "Landsat Collection 2 Level 2",
+    image: buildLandsatCollection(p, aoi).median()
+  };
+}
+
+function maskS2(img) {
+  const scl = img.select("SCL");
+  const mask = scl.neq(3).and(scl.neq(8)).and(scl.neq(9)).and(scl.neq(10)).and(scl.neq(11));
+  return img
+    .updateMask(mask)
+    .select(["B2", "B3", "B4", "B5", "B8", "B11", "B12"], ["BLUE", "GREEN", "RED", "RE1", "NIR", "SWIR1", "SWIR2"])
+    .multiply(0.0001)
+    .copyProperties(img, ["system:time_start"]);
+}
+
+function buildLandsatCollection(p, aoi) {
+  const ids = p.year >= 2021
+    ? ["LANDSAT/LC09/C02/T1_L2", "LANDSAT/LC08/C02/T1_L2"]
+    : p.year >= 2013
+      ? ["LANDSAT/LC08/C02/T1_L2"]
+      : p.year >= 1999
+        ? ["LANDSAT/LE07/C02/T1_L2"]
+        : ["LANDSAT/LT05/C02/T1_L2"];
+
+  return ids
+    .map((id) => ee.ImageCollection(id)
+      .filterBounds(aoi)
+      .filterDate(p.start, p.end)
+      .filter(ee.Filter.lte("CLOUD_COVER", p.cloud))
+      .map((img) => maskLandsat(img, id)))
+    .reduce((a, b) => a.merge(b));
+}
+
+function maskLandsat(img, id) {
+  const qa = img.select("QA_PIXEL");
+  const mask = qa.bitwiseAnd(1 << 4).eq(0)
+    .and(qa.bitwiseAnd(1 << 3).eq(0))
+    .and(qa.bitwiseAnd(1 << 5).eq(0))
+    .and(qa.bitwiseAnd(1 << 1).eq(0));
+
+  const isL89 = id.includes("LC08") || id.includes("LC09");
+  const opticalBands = isL89
+    ? ["SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B6", "SR_B7"]
+    : ["SR_B1", "SR_B2", "SR_B3", "SR_B4", "SR_B5", "SR_B7"];
+
+  const optical = img
+    .select(opticalBands, ["BLUE", "GREEN", "RED", "NIR", "SWIR1", "SWIR2"])
+    .multiply(0.0000275)
+    .add(-0.2);
+
+  const thermal = img
+    .select(isL89 ? "ST_B10" : "ST_B6")
+    .multiply(0.00341802)
+    .add(149)
+    .subtract(273.15)
+    .rename("THERMAL");
+
+  return optical.addBands(thermal).updateMask(mask).copyProperties(img, ["system:time_start"]);
+}
+
+function computeIndex(img, def) {
+  const b = (name) => img.select(name);
+  const BLUE = b("BLUE");
+  const GREEN = b("GREEN");
+  const RED = b("RED");
+  const NIR = b("NIR");
+  const SWIR1 = b("SWIR1");
+  const SWIR2 = b("SWIR2");
+
+  switch (def.id) {
+    case "NDVI": return img.normalizedDifference(["NIR", "RED"]);
+    case "EVI": return NIR.subtract(RED).multiply(2.5).divide(NIR.add(RED.multiply(6)).subtract(BLUE.multiply(7.5)).add(1));
+    case "SAVI": return NIR.subtract(RED).multiply(1.5).divide(NIR.add(RED).add(0.5));
+    case "MSAVI": {
+      const t = NIR.multiply(2).add(1);
+      return t.subtract(t.pow(2).subtract(NIR.subtract(RED).multiply(8)).sqrt()).divide(2);
+    }
+    case "NDMI": return img.normalizedDifference(["NIR", "SWIR1"]);
+    case "GCI": return NIR.divide(GREEN).subtract(1);
+    case "NDWI": return img.normalizedDifference(["GREEN", "NIR"]);
+    case "MNDWI": return img.normalizedDifference(["GREEN", "SWIR1"]);
+    case "AWEI": return GREEN.subtract(SWIR1).multiply(4).subtract(NIR.multiply(0.25).add(SWIR2.multiply(2.75)));
+    case "NDBI": return img.normalizedDifference(["SWIR1", "NIR"]);
+    case "UI": return img.normalizedDifference(["SWIR2", "NIR"]);
+    case "BSI": return SWIR1.add(RED).subtract(NIR.add(BLUE)).divide(SWIR1.add(RED).add(NIR).add(BLUE));
+    case "NBR": return img.normalizedDifference(["NIR", "SWIR2"]);
+    case "NDSI": return img.normalizedDifference(["GREEN", "SWIR1"]);
+    case "LST": return b("THERMAL");
+    default: throw new Error("مؤشر غير معروف.");
+  }
+}
+
+
+function getClassSpec(def, styleId) {
+  const id = def.id;
+  const luxury = styleId === "luxury" || styleId === "poster";
+  const thermal = styleId === "thermal";
+
+  const specs = {
+    NDVI: {
+      min: 1, max: 5,
+      breaks: [-0.05, 0.15, 0.35, 0.55],
+      palette: luxury ? ["#263238", "#b45309", "#facc15", "#65a30d", "#14532d"] : ["#7f1d1d", "#f97316", "#fde047", "#65a30d", "#166534"],
+      labels: ["ماء/ظل أو قيم سالبة", "غطاء نباتي ضعيف", "غطاء نباتي متوسط", "غطاء نباتي جيد", "غطاء نباتي كثيف"]
+    },
+    EVI: {
+      min: 1, max: 5,
+      breaks: [0.05, 0.18, 0.35, 0.55],
+      palette: ["#7f1d1d", "#f97316", "#fde047", "#65a30d", "#14532d"],
+      labels: ["منخفض جدًا", "منخفض", "متوسط", "مرتفع", "مرتفع جدًا"]
+    },
+    SAVI: {
+      min: 1, max: 5,
+      breaks: [0.05, 0.18, 0.35, 0.55],
+      palette: ["#7f1d1d", "#f97316", "#fde047", "#65a30d", "#14532d"],
+      labels: ["سطح عارٍ/ضعيف", "نبات ضعيف", "نبات متوسط", "نبات جيد", "نبات كثيف"]
+    },
+    MSAVI: {
+      min: 1, max: 5,
+      breaks: [0.05, 0.18, 0.35, 0.55],
+      palette: ["#7f1d1d", "#f97316", "#fde047", "#65a30d", "#14532d"],
+      labels: ["سطح عارٍ", "ضعيف", "متوسط", "جيد", "كثيف"]
+    },
+    NDMI: {
+      min: 1, max: 5,
+      breaks: [-0.25, -0.05, 0.15, 0.35],
+      palette: ["#7c2d12", "#d97706", "#fde68a", "#2dd4bf", "#0f766e"],
+      labels: ["جفاف شديد", "جفاف", "رطوبة منخفضة", "رطوبة متوسطة", "رطوبة مرتفعة"]
+    },
+    GCI: {
+      min: 1, max: 5,
+      breaks: [0.2, 0.8, 1.6, 3.0],
+      palette: ["#7f1d1d", "#f97316", "#fde047", "#65a30d", "#14532d"],
+      labels: ["كلوروفيل منخفض جدًا", "منخفض", "متوسط", "مرتفع", "مرتفع جدًا"]
+    },
+    NDWI: {
+      min: 1, max: 5,
+      breaks: [-0.30, -0.05, 0.15, 0.35],
+      palette: ["#7c2d12", "#f59e0b", "#d9f99d", "#38bdf8", "#075985"],
+      labels: ["جاف/عمران", "رطوبة ضعيفة", "رطوبة متوسطة", "مياه محتملة", "مياه واضحة"]
+    },
+    MNDWI: {
+      min: 1, max: 5,
+      breaks: [-0.25, 0.0, 0.20, 0.45],
+      palette: ["#7c2d12", "#f59e0b", "#d9f99d", "#38bdf8", "#075985"],
+      labels: ["غير مائي", "رطوبة ضعيفة", "رطوبة/قنوات محتملة", "مياه سطحية", "مياه واضحة"]
+    },
+    AWEI: {
+      min: 1, max: 5,
+      breaks: [-1.5, -0.5, 0.5, 1.5],
+      palette: ["#7c2d12", "#f59e0b", "#d9f99d", "#38bdf8", "#075985"],
+      labels: ["غير مائي", "ضعيف", "انتقال", "مياه محتملة", "مياه قوية"]
+    },
+    NDBI: {
+      min: 1, max: 5,
+      breaks: [-0.15, 0.0, 0.12, 0.25],
+      palette: luxury ? ["#0f766e", "#a3e635", "#fde047", "#f97316", "#dc2626"] : ["#2dd4bf", "#bef264", "#fde047", "#fb923c", "#b91c1c"],
+      labels: ["غير عمراني/نبات أو ماء", "عمران منخفض", "عمران متوسط", "عمران مرتفع", "نواة عمرانية كثيفة"]
+    },
+    UI: {
+      min: 1, max: 5,
+      breaks: [-0.15, 0.0, 0.12, 0.25],
+      palette: ["#0f766e", "#a3e635", "#fde047", "#f97316", "#dc2626"],
+      labels: ["غير عمراني", "منخفض", "متوسط", "مرتفع", "كثيف"]
+    },
+    BSI: {
+      min: 1, max: 5,
+      breaks: [-0.20, 0.0, 0.20, 0.40],
+      palette: ["#1d4ed8", "#84cc16", "#facc15", "#d97706", "#7c2d12"],
+      labels: ["ماء/نبات", "تربة قليلة الظهور", "تربة مكشوفة متوسطة", "تربة عارية", "تربة/سطوح عارية شديدة"]
+    },
+    NBR: {
+      min: 1, max: 5,
+      breaks: [-0.30, -0.10, 0.10, 0.30],
+      palette: ["#7f1d1d", "#ef4444", "#facc15", "#86efac", "#166534"],
+      labels: ["حرق/تدهور شديد", "تدهور", "انتقال", "نبات متوسط", "نبات/تعافٍ جيد"]
+    },
+    NDSI: {
+      min: 1, max: 5,
+      breaks: [-0.10, 0.10, 0.25, 0.40],
+      palette: ["#7c2d12", "#f59e0b", "#bae6fd", "#60a5fa", "#ffffff"],
+      labels: ["غير ثلجي", "انتقال", "ثلج ضعيف", "ثلج متوسط", "ثلج واضح"]
+    },
+    LST: {
+      min: 1, max: 5,
+      breaks: [25, 32, 38, 45],
+      palette: thermal ? ["#1d4ed8", "#38bdf8", "#facc15", "#f97316", "#b91c1c"] : ["#2563eb", "#67e8f9", "#fde047", "#f97316", "#dc2626"],
+      labels: ["بارد", "معتدل", "دافئ", "حار", "حار جدًا"]
+    }
+  };
+
+  return specs[id] || {
+    min: 1, max: 5,
+    breaks: [def.min + (def.max - def.min) * 0.2, def.min + (def.max - def.min) * 0.4, def.min + (def.max - def.min) * 0.6, def.min + (def.max - def.min) * 0.8],
+    palette: ["#1d4ed8", "#67e8f9", "#fde047", "#f97316", "#dc2626"],
+    labels: ["منخفض جدًا", "منخفض", "متوسط", "مرتفع", "مرتفع جدًا"]
+  };
+}
+
+function classifyImageForMap(img, def, styleId) {
+  const spec = getClassSpec(def, styleId);
+  let classified = ee.Image(1);
+  spec.breaks.forEach((breakValue, i) => {
+    classified = classified.where(img.gte(breakValue), i + 2);
+  });
+  classified = classified.updateMask(img.mask()).rename(`${def.id}_class`);
+  return { image: classified, vis: { min: spec.min, max: spec.max, palette: spec.palette }, classSpec: spec };
+}
+
+function makeClassLegendHtml(spec) {
+  if (!spec || !spec.labels) return "";
+  return spec.labels.map((label, i) => {
+    const color = spec.palette[i] || "#ccc";
+    return `<span class="class-chip"><i style="background:${color}"></i>${escapeHtml(label)}</span>`;
+  }).join("");
+}
+
+
+function getVisParams(def, styleId) {
+  const preset = STYLES[styleId] || STYLES.luxury || STYLES.classic;
+  const palette = preset.palettes[def.family] || preset.palettes.vegetation;
+  return { min: def.min, max: def.max, palette };
+}
+
+
+function enableExportButtonsV103(enabled) {
+  ["png", "posterpng", "tif", "shp", "script", "report"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !enabled;
+  });
+}
+
+function safeEeMessageV103(error) {
+  if (!error) return "Unknown Earth Engine error";
+  if (typeof error === "string") return error;
+  if (error.message) return error.message;
+  try { return JSON.stringify(error); } catch { return String(error); }
+}
+
+async function updateStats(img, aoi, scale, band) {
+  const reducer = ee.Reducer.mean()
+    .combine({ reducer2: ee.Reducer.minMax(), sharedInputs: true })
+    .combine({ reducer2: ee.Reducer.stdDev(), sharedInputs: true });
+
+  const stats = await eePromise((resolve, reject) => {
+    img.reduceRegion({
+      reducer,
+      geometry: aoi,
+      scale: Math.max(Number(scale) || 30, 250),
+      bestEffort: true,
+      tileScale: 8,
+      maxPixels: 1e7
+    }).evaluate((data, error) => (error ? reject(error) : resolve(data)));
+  });
+
+  $("#mean").textContent = formatNumber(stats[`${band}_mean`]);
+  $("#min").textContent = formatNumber(stats[`${band}_min`]);
+  $("#max").textContent = formatNumber(stats[`${band}_max`]);
+  $("#std").textContent = formatNumber(stats[`${band}_stdDev`]);
+}
+
+function updateIndexInfo() {
+  const def = INDICES.find((x) => x.id === $("#idx").value) || INDICES[0];
+  $("#desc").textContent = def.description;
+  $("#formula").textContent = def.formula;
+  if (def.forceSensor) $("#sensor").value = "landsat";
+}
+
+function updateDates() {
+  const y = Number($("#year").value);
+  $("#start").value = `${y}-01-01`;
+  $("#end").value = `${y}-12-31`;
+}
+
+function drawAoi() {
+  if (!S.map) return;
+  const cityDef = CITIES.find((c) => c.id === $("#city").value) || CITIES[0];
+  const bbox = parseBbox($("#bbox").value) || cityDef.bbox;
+  const [x1, y1, x2, y2] = bbox;
+
+  if (S.aoiLayer) S.map.removeLayer(S.aoiLayer);
+  S.aoiLayer = L.rectangle([[y1, x1], [y2, x2]], {
+    color: "#22d3ee",
+    weight: 2,
+    fillColor: "#22d3ee",
+    fillOpacity: 0.055,
+    dashArray: "6 6"
+  }).addTo(S.map);
+}
+
+function fitAoi() {
+  const cityDef = CITIES.find((c) => c.id === $("#city").value) || CITIES[0];
+  const bbox = parseBbox($("#bbox").value) || cityDef.bbox;
+  const [x1, y1, x2, y2] = bbox;
+  S.map.fitBounds([[y1, x1], [y2, x2]], { padding: [24, 24] });
+}
+
+function clearLayer() {
+  if (S.eeLayer) {
+    S.map.removeLayer(S.eeLayer);
+    S.eeLayer = null;
+  }
+}
+
+function updateLegend(def, vis, classSpec) {
+  $("#legendName").textContent = `${def.id} — ${def.ar}`;
+  $("#legendRange").textContent = classSpec ? "تصنيف تفسيري GIS" : `${def.min} → ${def.max}`;
+  $("#ramp").style.background = `linear-gradient(90deg, ${vis.palette.join(",")})`;
+
+  let classes = document.getElementById("classLegend");
+  if (!classes) {
+    classes = document.createElement("div");
+    classes.id = "classLegend";
+    classes.className = "class-legend";
+    document.querySelector(".legend").appendChild(classes);
+  }
+  classes.innerHTML = classSpec ? makeClassLegendHtml(classSpec) : "";
+}
+
+function makeGeoJSON() {
+  const p = readParams();
+  const [x1, y1, x2, y2] = p.bbox;
+  return {
+    type: "FeatureCollection",
+    features: [{
+      type: "Feature",
+      properties: {
+        city_ar: p.city.ar,
+        city_en: p.city.en,
+        index: p.indexId,
+        year: p.year,
+        signature: CONFIG.APP_SIGNATURE || "kamel3lom"
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates: [[[x1, y1], [x2, y1], [x2, y2], [x1, y2], [x1, y1]]]
+      }
+    }]
+  };
+}
+
+function downloadGeoJSON() {
+  const p = readParams();
+  downloadText(`AOI_${safeName(p.city.en)}_${p.year}.geojson`, JSON.stringify(makeGeoJSON(), null, 2), "application/geo+json");
+}
+
+async function downloadSHP() {
+  if (!S.connected) return showToast("اتصل بـ Earth Engine أولًا.");
+  const p = readParams();
+  const aoi = ee.Geometry.Rectangle(p.bbox, null, false);
+  const fc = ee.FeatureCollection([ee.Feature(aoi, { city: p.city.en, index: p.indexId, year: p.year })]);
+  const url = await eePromise((resolve, reject) => {
+    fc.getDownloadURL({ format: "SHP", filename: `AOI_${safeName(p.city.en)}_${p.year}` }, (data, error) => (error ? reject(error) : resolve(data)));
+  });
+  openUrl(url);
+}
+
+async function downloadPNG() {
+  ensureAnalysis();
+  const { p, displayImg, vis } = S.current;
+  const visual = displayImg.visualize(vis);
+
+  try {
+    const url = await eePromise((resolve, reject) => {
+      visual.getThumbURL({
+        region: ee.Geometry.Rectangle(p.bbox, null, false),
+        dimensions: 1200,
+        format: "png"
+      }, (data, error) => (error ? reject(error) : resolve(data)));
+    });
+    openUrl(url);
+  } catch (error) {
+    writeLog("PNG_DOWNLOAD_WARNING_V103: " + safeEeMessageV103(error));
+    const url = await eePromise((resolve, reject) => {
+      visual.getThumbURL({
+        region: ee.Geometry.Rectangle(p.bbox, null, false),
+        dimensions: 800,
+        format: "png"
+      }, (data, err) => (err ? reject(err) : resolve(data)));
+    });
+    openUrl(url);
+  }
+}
+
+async function downloadPosterPNG() {
+  ensureAnalysis();
+  if (!window.html2canvas) {
+    throw new Error("مكتبة تصدير البوستر لم تُحمّل. حدّث الصفحة أو تحقق من اتصال الإنترنت.");
+  }
+
+  const target = document.querySelector(".mapbox");
+  const canvas = await html2canvas(target, {
+    backgroundColor: "#07111f",
+    scale: 2,
+    useCORS: true,
+    allowTaint: true,
+    logging: false
+  });
+
+  const { p } = S.current;
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      showToast("تعذر إنشاء صورة البوستر.");
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `GeoIndex_Poster_${p.indexId}_${safeName(p.city.en)}_${p.year}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1200);
+  }, "image/png", 0.96);
+}
+
+async function downloadTIF() {
+  ensureAnalysis();
+  const { p, img } = S.current;
+  const directScale = Math.max(Number(p.scale) || 30, 100);
+
+  try {
+    const url = await eePromise((resolve, reject) => {
+      img.getDownloadURL({
+        name: `${p.indexId}_${safeName(p.city.en)}_${p.year}`,
+        region: ee.Geometry.Rectangle(p.bbox, null, false),
+        scale: directScale,
+        crs: "EPSG:4326",
+        fileFormat: "GeoTIFF"
+      }, (data, error) => (error ? reject(error) : resolve(data)));
+    });
+    openUrl(url);
+  } catch (error) {
+    writeLog("GEOTIFF_DOWNLOAD_ERROR_V103: " + safeEeMessageV103(error));
+    showToast("تعذر تنزيل GeoTIFF مباشرة بسبب حجم المنطقة/الذاكرة. انسخ كود التصدير الكبير وشغّله في Earth Engine Code Editor.");
+    throw error;
+  }
+}
+
+function copyScript() {
+  ensureAnalysis();
+  const { p } = S.current;
+  const bbox = JSON.stringify(p.bbox);
+  const vis = getVisParams(p.def, p.styleId);
+  const palette = JSON.stringify(vis.palette);
+  const code = `// Earth Engine Code Editor export script\n// Generated by Earth Engine Index Studio — ${CONFIG.APP_SIGNATURE || "kamel3lom"}\n\nvar aoi = ee.Geometry.Rectangle(${bbox}, null, false);\nvar startDate = '${p.start}';\nvar endDate = '${p.end}';\nvar cloudMax = ${p.cloud};\nvar scale = ${p.scale};\nvar indexId = '${p.indexId}';\n\n// Paste the full processing functions from the app README if you need large exports.\n// This quick script documents the selected export target.\nprint('AOI', aoi);\nprint('Index', indexId);\nprint('Palette', ${palette});\n\n// Use the app direct GeoTIFF/PNG buttons for small/medium areas.\n// For production exports, rebuild the same index in Earth Engine Code Editor and use Export.image.toDrive.\n`;
+  copyText(code);
+}
+
+function copyReport() {
+  ensureAnalysis();
+  const p = S.current.p;
+  const report = [
+    "Earth Engine Index Studio",
+    `Signature: ${CONFIG.APP_SIGNATURE || "kamel3lom"}`,
+    `Email: ${p.email || "غير محدد"}`,
+    `City: ${p.city.ar}/${p.city.en}`,
+    `Index: ${p.indexId}`,
+    `Year: ${p.year}`,
+    `Period: ${p.start} to ${p.end}`,
+    `Mean: ${$("#mean").textContent}`,
+    `Min: ${$("#min").textContent}`,
+    `Max: ${$("#max").textContent}`,
+    `Std: ${$("#std").textContent}`
+  ].join("\n");
+  copyText(report);
+}
+
+function parseBbox(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const parts = text.split(",").map((x) => Number(x.trim()));
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
+    showToast("BBOX غير صحيح.");
+    return null;
+  }
+  return parts;
+}
+
+function setStatus(items) {
+  $("#status").innerHTML = items.map((x) => `<li>${escapeHtml(x)}</li>`).join("");
+}
+
+function setAuth(state) {
+  const el = $("#authState");
+  el.className = "dot " + (state === true ? "on" : state === "work" ? "work" : "off");
+  el.textContent = state === true ? "متصل" : state === "work" ? "جارٍ التنفيذ" : "غير متصل";
+}
+
+function setButtons(enabled) {
+  ["#connectBtn", "#settingsBtn", "#reset", "#fit", "#clear"].forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.disabled = !enabled;
+  });
+  const submit = $("#form button[type='submit']");
+  if (submit) submit.disabled = !enabled;
+}
+
+function ensureAnalysis() {
+  if (!S.current) throw new Error("نفّذ التحليل أولًا.");
+}
+
+function eePromise(fn) {
+  return new Promise(fn);
+}
+
+function formatNumber(value) {
+  return value == null || Number.isNaN(Number(value)) ? "—" : Number(value).toFixed(4);
+}
+
+function safeName(value) {
+  return String(value).replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[c]));
+}
+
+function downloadText(name, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function openUrl(url) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function copyText(text) {
+  await navigator.clipboard.writeText(text);
+  showToast("تم النسخ.");
+}
+
+function writeLog(message) {
+  const el = $("#log");
+  el.textContent = `[${new Date().toLocaleTimeString("ar")}] ${message}\n` + el.textContent;
+}
+
+function showToast(message) {
+  const el = $("#toast");
+  el.textContent = message;
+  el.classList.add("show");
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => el.classList.remove("show"), 3000);
+}
+
+function handleError(error) {
+  setButtons(true);
+  setAuth(S.connected ? true : false);
+  const message = error?.message || String(error);
+  writeLog("ERROR: " + message);
+  setStatus(["حدث خطأ.", message]);
+  showToast(message);
+  console.error(error);
+}
+
+window.addEventListener("DOMContentLoaded", init);
